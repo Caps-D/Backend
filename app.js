@@ -3,6 +3,10 @@ const express = require('express');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 
+const generateToken = (user) => {
+    return jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '7d' }); // 토큰 유효기간 7일
+};
+
 const app = express();
 const port = 3000;
 const pool = require('./db'); // MySQL 연결 파일 가져오기
@@ -69,11 +73,31 @@ app.get('/auth/kakao/callback', async (req, res) => {
                  ON DUPLICATE KEY UPDATE email = VALUES(email), nickname = VALUES(nickname)`,
                 [user.id, user.email, user.nickname, user.provider]
             );
+            const [existingData] = await connection.query(
+                `SELECT * FROM user_data WHERE user_id = ?`, 
+                [user.id]
+            );
+        
+            if (existingData.length === 0) {
+                // ✅ 최초 로그인 시에만 기본 데이터 삽입
+                await connection.query(
+                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [user.id, 1, 0, '기본 운동', 10, 3, 0, 'unknown', null, null, 0]
+                );
+        
+                console.log("✅ `user_data`에 기본 정보 삽입 완료");
+            }
             console.log("사용자 정보 저장 완료:", result);
         } finally {
             connection.release();
         }
+        const token = generateToken({ id: user.id });
 
+        res.json({
+            message: '로그인 성공',
+            token,
+        });
 
 
     } catch (error) {
@@ -86,7 +110,6 @@ app.get('/auth/kakao/callback', async (req, res) => {
             details: error.response?.data || error.message 
         });
     }
-    res.redirect('http://34.47.97.192:3000/');
 });
 
 
@@ -131,6 +154,22 @@ app.get('/auth/naver/callback', async (req, res) => {
                  ON DUPLICATE KEY UPDATE email = VALUES(email), nickname = VALUES(nickname)`,
                 [user.id, user.email, user.nickname, user.provider]
             );
+            const [existingData] = await connection.query(
+                `SELECT * FROM user_data WHERE user_id = ?`, 
+                [user.id]
+            );
+        
+            if (existingData.length === 0) {
+                // ✅ 최초 로그인 시에만 기본 데이터 삽입
+                await connection.query(
+                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [user.id, 1, 0, '기본 운동', 10, 3, 0, 'unknown', null, null, 0]
+                );
+                
+        
+                console.log("✅ `user_data`에 기본 정보 삽입 완료");
+            }
         } finally {
             connection.release();
         }
@@ -192,6 +231,22 @@ app.get('/auth/google/callback', async (req, res) => {
                  ON DUPLICATE KEY UPDATE email = VALUES(email), nickname = VALUES(nickname)`,
                 [user.id, user.email, user.nickname, user.provider]
             );
+            
+            const [existingData] = await connection.query(
+                `SELECT * FROM user_data WHERE user_id = ?`, 
+                [user.id]
+            );
+        
+            if (existingData.length === 0) {
+                // ✅ 최초 로그인 시에만 기본 데이터 삽입
+                await connection.query(
+                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [user.id, 1, 0, '기본 운동', 10, 3, 0, 'unknown', null, null, 0]
+                );
+        
+                console.log("✅ `user_data`에 기본 정보 삽입 완료");
+            }
         } finally {
             connection.release();
         }
@@ -212,8 +267,213 @@ app.get('/auth/google/callback', async (req, res) => {
     
 });
 
+// MainData = {
+//     level: number;
+//     coin: number;
+//     targetExercise: string;
+//     targetcount: number;
+//     targetSet: number;
+//     targetCheck: number;
+//     character: {
+//         gender: string;
+//         top: string | null;
+//         pants: string | null;
+//         state: number | null;
+//     };
+// };
 
 
+const authenticate = (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+        return res.status(401).json({ error: '인증 토큰이 없습니다.' });
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (error) {
+        return res.status(401).json({ error: '유효하지 않은 토큰입니다.' });
+    }
+};
+
+app.get('/main', authenticate, async (req, res) => {
+    const userId = req.user.id;
+
+    try {
+        const connection = await pool.getConnection();
+        const [rows] = await connection.query(
+            `SELECT level, coin, targetExercise, targetcount, targetSet, targetCheck, 
+                    gender, top, pants, state 
+             FROM user_data 
+             WHERE user_id = ?`, 
+            [userId]
+        );
+        connection.release();
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: '사용자 데이터가 없습니다.' });
+        }
+
+        const userData = rows[0];
+        
+
+        const MainData= {
+            level: userData.level,
+            coin: userData.coin,
+            targetExercise: userData.targetExercise,
+            targetcount: userData.targetcount,
+            targetSet: userData.targetSet,
+            targetCheck: userData.targetCheck,
+            character: {
+                gender: userData.gender,
+                top: userData.top,
+                pants: userData.pants,
+                state: userData.state,
+            },
+        };
+
+        res.json(MainData);
+
+    } catch (error) {
+        console.error("사용자 데이터 조회 오류:", error);
+        res.status(500).json({ error: '서버 오류' });
+    }
+});
+
+// 친구 추가
+app.post('/addFriend', authenticate, async (req, res) => {
+    const { friendNickname } = req.body;
+    const userId = req.user.id; // 현재 로그인한 사용자 ID
+
+    if (!friendNickname) {
+        return res.status(400).json({ error: '친구 닉네임을 입력하세요.' });
+    }
+
+    const connection = await pool.getConnection();
+    try {
+        // 1️⃣ 친구의 user_id 찾기
+        const [friendData] = await connection.query(
+            `SELECT id, nickname FROM users WHERE nickname = ?`,
+            [friendNickname]
+        );
+
+        if (friendData.length === 0) {
+            return res.status(404).json({ error: '해당 닉네임을 가진 사용자가 없습니다.' });
+        }
+
+        const friendId = friendData[0].id;
+        const friendNick = friendData[0].nickname;
+
+        // 2️⃣ 이미 친구인지 확인
+        const [existingFriend] = await connection.query(
+            `SELECT * FROM friends WHERE user_id = ? AND friend_id = ?`,
+            [userId, friendId]
+        );
+
+        if (existingFriend.length > 0) {
+            return res.status(400).json({ error: '이미 친구로 추가된 사용자입니다.' });
+        }
+
+        // 3️⃣ 친구 추가
+        await connection.query(
+            `INSERT INTO friends (user_id, friend_id, friend_nickname) VALUES (?, ?, ?)`,
+            [userId, friendId, friendNick]
+        );
+
+        res.json({ message: '친구 추가 성공', friend: friendNick });
+
+    } catch (error) {
+        console.error('친구 추가 오류:', error);
+        res.status(500).json({ error: '서버 오류' });
+    } finally {
+        connection.release();
+    }
+});
+
+// 친구 목록 가져오기
+app.get('/friends', authenticate, async (req, res) => {
+    const userId = req.user.id; // 현재 로그인한 사용자 ID
+
+    const connection = await pool.getConnection();
+    try {
+        // ✅ 내 친구 목록 조회 (내가 추가한 친구들)
+        const [friendsList] = await connection.query(
+            `SELECT f.friend_id AS id, u.nickname AS nickname, f.status, f.created_at
+             FROM friends f
+             JOIN users u ON f.friend_id = u.id
+             WHERE f.user_id = ?`,
+            [userId]
+        );
+
+        // ✅ 나를 추가한 친구 목록 조회 (상대방이 나를 추가한 경우)
+        const [friendsAddedMe] = await connection.query(
+            `SELECT f.user_id AS id, u.nickname AS nickname, f.status, f.created_at
+             FROM friends f
+             JOIN users u ON f.user_id = u.id
+             WHERE f.friend_id = ?`,
+            [userId]
+        );
+
+        // ✅ 친구 목록 통합 (중복 제거)
+        const allFriends = [...friendsList, ...friendsAddedMe].filter(
+            (friend, index, self) =>
+                index === self.findIndex((f) => f.id === friend.id)
+        );
+
+        res.json({ friends: allFriends });
+
+    } catch (error) {
+        console.error('친구 목록 조회 오류:', error);
+        res.status(500).json({ error: '서버 오류' });
+    } finally {
+        connection.release();
+    }
+});
+
+// 친구 삭제
+app.delete('/removeFriend', authenticate, async (req, res) => {
+    const { friendNickname } = req.body;
+    const userId = req.user.id; // 현재 로그인한 사용자 ID
+
+    if (!friendNickname) {
+        return res.status(400).json({ error: '삭제할 친구의 닉네임을 입력하세요.' });
+    }
+
+    const connection = await pool.getConnection();
+    try {
+        // 1️⃣ 친구의 user_id 찾기
+        const [friendData] = await connection.query(
+            `SELECT id FROM users WHERE nickname = ?`,
+            [friendNickname]
+        );
+
+        if (friendData.length === 0) {
+            return res.status(404).json({ error: '해당 닉네임을 가진 사용자가 없습니다.' });
+        }
+
+        const friendId = friendData[0].id;
+
+        // 2️⃣ 친구 관계 삭제 (내가 추가한 친구 or 상대가 나를 추가한 경우)
+        const [deleteResult] = await connection.query(
+            `DELETE FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,
+            [userId, friendId, friendId, userId]
+        );
+
+        if (deleteResult.affectedRows === 0) {
+            return res.status(400).json({ error: '해당 사용자는 친구 목록에 없습니다.' });
+        }
+
+        res.json({ message: '친구 삭제 성공', friend: friendNickname });
+
+    } catch (error) {
+        console.error('친구 삭제 오류:', error);
+        res.status(500).json({ error: '서버 오류' });
+    } finally {
+        connection.release();
+    }
+});
 
 // 서버 시작
 app.listen(port, () => {
