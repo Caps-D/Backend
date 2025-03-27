@@ -6,13 +6,20 @@ const jwt = require('jsonwebtoken');
 const generateToken = (user) => {
     return jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '7d' }); // 토큰 유효기간 7일
 };
+const cors = require('cors');
 
 const app = express();
 const port = 3000;
 const pool = require('./db'); // MySQL 연결 파일 가져오기
+const cookieParser = require('cookie-parser');
 
+app.use(cors({
+    origin: 'http://34.47.97.192:5173', 
+    credentials: true,               
+}));
 
 app.use(express.json());
+app.use(cookieParser());
 
 app.get('/', (req, res) => {
     res.send("hi, we're h4!");
@@ -28,14 +35,12 @@ app.get('/auth/kakao', (req, res) => {
  */
 app.get('/auth/kakao/callback', async (req, res) => {
     const { code } = req.query;
-    console.log("카카오 인가 코드:", code);
 
     if (!code) {
         return res.status(400).json({ error: '인가 코드가 없습니다.' });
     }
 
     try {
-        // 1. 카카오 API에서 Access Token 발급
         const tokenResponse = await axios.post('https://kauth.kakao.com/oauth/token', null, {
             params: {
                 grant_type: 'authorization_code',
@@ -47,14 +52,11 @@ app.get('/auth/kakao/callback', async (req, res) => {
         });
 
         const accessToken = tokenResponse.data.access_token;
-        console.log("카카오 액세스 토큰:", accessToken);
 
-        // 2. Access Token을 사용해 사용자 정보 가져오기
         const userResponse = await axios.get('https://kapi.kakao.com/v2/user/me', {
             headers: { Authorization: `Bearer ${accessToken}` },
         });
 
-        // 3. 가져온 사용자 정보 객체로 변환
         const user = {
             id: userResponse.data.id.toString(),
             email: userResponse.data.kakao_account.email || null,
@@ -62,56 +64,66 @@ app.get('/auth/kakao/callback', async (req, res) => {
             provider: 'kakao',
         };
 
-        console.log("카카오 사용자 정보:", user);
-
-        // 4. MySQL 데이터베이스에 사용자 정보 저장
         const connection = await pool.getConnection();
+        let redirectPath = '/main';
         try {
-            const [result] = await connection.query(
-                `INSERT INTO users (id, email, nickname, provider) 
-                 VALUES (?, ?, ?, ?) 
-                 ON DUPLICATE KEY UPDATE email = VALUES(email), nickname = VALUES(nickname)`,
-                [user.id, user.email, user.nickname, user.provider]
-            );
-            const [existingData] = await connection.query(
-                `SELECT * FROM user_data WHERE user_id = ?`, 
-                [user.id]
-            );
-        
-            if (existingData.length === 0) {
-                // ✅ 최초 로그인 시에만 기본 데이터 삽입
-                await connection.query(
-                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [user.id, 1, 0, '기본 운동', 10, 3, 0, 'unknown', null, null, 0]
+            // 👇 users 테이블에서 해당 사용자 존재 여부 확인
+            if (user.email) {
+                [existingUser] = await connection.query(
+                    `SELECT * FROM users WHERE email = ?`,
+                    [user.email]
                 );
-        
-                console.log("✅ `user_data`에 기본 정보 삽입 완료");
             }
-            console.log("사용자 정보 저장 완료:", result);
+            if (existingUser.length === 0) {
+                [existingUser] = await connection.query(
+                    `SELECT * FROM users WHERE id = ?`,
+                    [user.id]
+                );
+            }
+            if (existingUser.length === 0) {
+                // 🔁 존재하지 않으면 users 테이블에 삽입
+                await connection.query(
+                    `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)`,
+                    [user.id, user.email, user.nickname, user.provider]
+                );
+
+                // 👉 이 경우엔 /signup 으로 보냄
+                redirectPath = '/signup';
+            } else {
+                // 🔁 존재하는 유저라면 정보 업데이트
+                await connection.query(
+                    `UPDATE users SET email = ?, nickname = ? WHERE id = ?`,
+                    [user.email, user.nickname, user.id]
+                );
+            }
+
+            // user_data는 별도 관리 - 있어도 되고 없어도 됨
         } finally {
             connection.release();
         }
+
         const token = generateToken({ id: user.id });
 
-        res.json({
-            message: '로그인 성공',
-            token,
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: false,
+            sameSite: 'Lax',
         });
+        const cors = require('cors');
 
+        app.use(cors({
+            origin: 'http://34.47.97.192:5173/',  // 프론트엔드 도메인
+            credentials: true,  // 쿠키가 전송되도록 설정
+        }));
+
+        // 👉 조건에 따라 리디렉션
+        res.redirect(`http://34.47.97.192:5173${redirectPath}`);
 
     } catch (error) {
-        console.error("카카오 로그인 오류 발생:", error);
-        console.error("오류 응답 데이터:", error.response?.data || "응답 없음");
-        console.error("오류 메시지:", error.message);
-
-        res.status(400).json({ 
-            error: '카카오 로그인 실패', 
-            details: error.response?.data || error.message 
-        });
+        console.error("카카오 로그인 오류:", error);
+        res.status(400).json({ error: '카카오 로그인 실패' });
     }
 });
-
 
 app.get('/auth/naver', (req, res) => {
     const state = Math.random().toString(36).substring(2, 15); // CSRF 방지를 위한 상태 값
@@ -136,6 +148,7 @@ app.get('/auth/naver/callback', async (req, res) => {
         });
 
         const accessToken = tokenResponse.data.access_token;
+
         const userResponse = await axios.get('https://openapi.naver.com/v1/nid/me', {
             headers: { Authorization: `Bearer ${accessToken}` },
         });
@@ -148,36 +161,47 @@ app.get('/auth/naver/callback', async (req, res) => {
         };
 
         const connection = await pool.getConnection();
+        let redirectPath = '/main';
         try {
-            await connection.query(
-                `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE email = VALUES(email), nickname = VALUES(nickname)`,
-                [user.id, user.email, user.nickname, user.provider]
-            );
-            const [existingData] = await connection.query(
-                `SELECT * FROM user_data WHERE user_id = ?`, 
+            const [existingUser] = await connection.query(
+                `SELECT * FROM users WHERE id = ?`,
                 [user.id]
             );
-        
-            if (existingData.length === 0) {
-                // ✅ 최초 로그인 시에만 기본 데이터 삽입
+
+            if (existingUser.length === 0) {
                 await connection.query(
-                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [user.id, 1, 0, '기본 운동', 10, 3, 0, 'unknown', null, null, 0]
+                    `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)`,
+                    [user.id, user.email, user.nickname, user.provider]
                 );
-                
-        
-                console.log("✅ `user_data`에 기본 정보 삽입 완료");
+                redirectPath = '/signup';
+            } else {
+                await connection.query(
+                    `UPDATE users SET email = ?, nickname = ? WHERE id = ?`,
+                    [user.email, user.nickname, user.id]
+                );
             }
         } finally {
             connection.release();
         }
+
+        const token = generateToken({ id: user.id });
+
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'Lax',
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+
+        res.redirect(`http://34.47.97.192:5173${redirectPath}`);
+
     } catch (error) {
+        console.error('네이버 로그인 오류:', error);
         res.status(400).json({ error: '네이버 로그인 실패' });
     }
-    res.redirect('http://34.47.97.192:3000/');
 });
+
+
 
 app.get('/auth/google', (req, res) => {
     const googleAuthUrl = `https://accounts.google.com/o/oauth2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${process.env.GOOGLE_REDIRECT_URI}&response_type=code&scope=email%20profile`;
@@ -188,14 +212,12 @@ app.get('/auth/google', (req, res) => {
 // **구글 로그인**
 app.get('/auth/google/callback', async (req, res) => {
     const { code } = req.query;
-    console.log("구글 인가 코드:", code);
 
     if (!code) {
         return res.status(400).json({ error: '인가 코드가 없습니다.' });
     }
 
     try {
-        // 1. 구글 API에서 Access Token 발급
         const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', null, {
             params: {
                 grant_type: 'authorization_code',
@@ -207,9 +229,7 @@ app.get('/auth/google/callback', async (req, res) => {
         });
 
         const accessToken = tokenResponse.data.access_token;
-        console.log("구글 액세스 토큰:", accessToken);
 
-        // 2. Access Token을 사용해 사용자 정보 가져오기
         const userResponse = await axios.get('https://www.googleapis.com/oauth2/v1/userinfo', {
             headers: { Authorization: `Bearer ${accessToken}` },
         });
@@ -221,51 +241,47 @@ app.get('/auth/google/callback', async (req, res) => {
             provider: 'google',
         };
 
-        console.log("구글 사용자 정보:", user);
-
-        // 3. MySQL 데이터베이스에 사용자 정보 저장
         const connection = await pool.getConnection();
+        let redirectPath = '/main';
         try {
-            await connection.query(
-                `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE email = VALUES(email), nickname = VALUES(nickname)`,
-                [user.id, user.email, user.nickname, user.provider]
-            );
-            
-            const [existingData] = await connection.query(
-                `SELECT * FROM user_data WHERE user_id = ?`, 
+            const [existingUser] = await connection.query(
+                `SELECT * FROM users WHERE id = ?`,
                 [user.id]
             );
-        
-            if (existingData.length === 0) {
-                // ✅ 최초 로그인 시에만 기본 데이터 삽입
+
+            if (existingUser.length === 0) { 
                 await connection.query(
-                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [user.id, 1, 0, '기본 운동', 10, 3, 0, 'unknown', null, null, 0]
+                    `INSERT INTO users (id, nickname, provider) VALUES (?, ?, ?)`,
+                    [user.id, user.nickname, user.provider]
                 );
-        
-                console.log("✅ `user_data`에 기본 정보 삽입 완료");
+                redirectPath = '/signup';
+            } else {
+                await connection.query(
+                    `UPDATE users SET email = ?, nickname = ? WHERE id = ?`,
+                    [user.email, user.nickname, user.id]
+                );
             }
         } finally {
             connection.release();
         }
 
-        // 4. 클라이언트에 사용자 정보 JSON 응답
-        res.redirect('http://34.47.97.192:3000/');
+        const token = generateToken({ id: user.id });
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: false,
+            sameSite: 'Lax',
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+
+        res.redirect(`http://34.47.97.192:5173${redirectPath}`);
 
     } catch (error) {
-        console.error("구글 로그인 오류 발생:", error);
-        console.error("오류 응답 데이터:", error.response?.data || "응답 없음");
-        console.error("오류 메시지:", error.message);
-
-        return res.status(400).json({ 
-            error: '구글 로그인 실패', 
-            details: error.response?.data || error.message 
-        });
+        console.error("구글 로그인 오류:", error);
+        res.status(400).json({ error: '구글 로그인 실패' });
     }
-    
 });
+
+
 
 // MainData = {
 //     level: number;
@@ -284,11 +300,10 @@ app.get('/auth/google/callback', async (req, res) => {
 
 
 const authenticate = (req, res, next) => {
-    const token = req.headers.authorization?.split(' ')[1];
+    const token = req.cookies.token;
     if (!token) {
-        return res.status(401).json({ error: '인증 토큰이 없습니다.' });
+        return res.status(401).json({ error: '인증 토큰이 X' });
     }
-
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = decoded;
@@ -297,6 +312,7 @@ const authenticate = (req, res, next) => {
         return res.status(401).json({ error: '유효하지 않은 토큰입니다.' });
     }
 };
+
 
 app.get('/main', authenticate, async (req, res) => {
     const userId = req.user.id;
@@ -366,7 +382,6 @@ app.post('/addFriend', authenticate, async (req, res) => {
         const friendId = friendData[0].id;
         const friendNick = friendData[0].nickname;
 
-        // 2️⃣ 이미 친구인지 확인
         const [existingFriend] = await connection.query(
             `SELECT * FROM friends WHERE user_id = ? AND friend_id = ?`,
             [userId, friendId]
@@ -376,7 +391,6 @@ app.post('/addFriend', authenticate, async (req, res) => {
             return res.status(400).json({ error: '이미 친구로 추가된 사용자입니다.' });
         }
 
-        // 3️⃣ 친구 추가
         await connection.query(
             `INSERT INTO friends (user_id, friend_id, friend_nickname) VALUES (?, ?, ?)`,
             [userId, friendId, friendNick]
@@ -474,6 +488,41 @@ app.delete('/removeFriend', authenticate, async (req, res) => {
         connection.release();
     }
 });
+
+// 성별추가
+app.post('/signup', authenticate, async (req, res) => {
+    const userId = req.user.id;
+    const { gender, nickname } = req.body;
+
+    // ✅ 유효성 검사
+    if (!gender || !['male', 'female', 'unknown'].includes(gender)) {
+        return res.status(400).json({ error: '유효한 성별을 입력하세요. (male, female, unknown)' });
+    }
+
+    if (!nickname || nickname.trim().length < 1) {
+        return res.status(400).json({ error: '닉네임을 입력하세요.' });
+    }
+
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.query(
+            `UPDATE users SET gender = ?, nickname = ? WHERE id = ?`,
+            [gender, nickname, userId]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: '해당 사용자를 찾을 수 없습니다.' });
+        }
+
+        res.json({ message: '성별 및 닉네임이 업데이트되었습니다.', gender, nickname });
+    } catch (error) {
+        console.error('성별/닉네임 업데이트 오류:', error);
+        res.status(500).json({ error: '서버 오류' });
+    } finally {
+        connection.release();
+    }
+});
+
 
 // 서버 시작
 app.listen(port, () => {
