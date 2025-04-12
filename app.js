@@ -14,7 +14,7 @@ const pool = require('./db'); // MySQL 연결 파일 가져오기
 const cookieParser = require('cookie-parser');
 
 app.use(cors({
-    origin: 'http://34.47.97.192:5173', 
+    origin: 'http://localhost:5173', 
     credentials: true,               
 }));
 
@@ -86,6 +86,12 @@ app.get('/auth/kakao/callback', async (req, res) => {
                     `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)`,
                     [user.id, user.email, user.nickname, user.provider]
                 );
+                await connection.query(
+                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
+                     VALUES (?, 1, 500, 0, 0, 0, 0, NULL, NULL, NULL, NULL)`,
+                    [user.id]
+                );
+                
 
                 // 👉 이 경우엔 /signup 으로 보냄
                 redirectPath = '/signup';
@@ -173,6 +179,12 @@ app.get('/auth/naver/callback', async (req, res) => {
                     `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)`,
                     [user.id, user.email, user.nickname, user.provider]
                 );
+                await connection.query(
+                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
+                     VALUES (?, 1, 500, 0, 0, 0, 0, NULL, NULL, NULL, NULL)`,
+                    [user.id]
+                );
+                
                 redirectPath = '/signup';
             } else {
                 await connection.query(
@@ -254,6 +266,12 @@ app.get('/auth/google/callback', async (req, res) => {
                     `INSERT INTO users (id, nickname, provider) VALUES (?, ?, ?)`,
                     [user.id, user.nickname, user.provider]
                 );
+                await connection.query(
+                    `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
+                     VALUES (?, 1, 500, 0, 0, 0, 0, NULL, NULL, NULL, NULL)`,
+                    [user.id]
+                );
+                
                 redirectPath = '/signup';
             } else {
                 await connection.query(
@@ -408,32 +426,34 @@ app.post('/addFriend', authenticate, async (req, res) => {
 
 // 친구 목록 가져오기
 app.get('/friends', authenticate, async (req, res) => {
-    const userId = req.user.id; // 현재 로그인한 사용자 ID
+    const userId = req.user.id;
 
     const connection = await pool.getConnection();
     try {
-        // ✅ 내 친구 목록 조회 (내가 추가한 친구들)
+        // 내가 추가한 친구 목록 조회
         const [friendsList] = await connection.query(
-            `SELECT f.friend_id AS id, u.nickname AS nickname, f.status, f.created_at
+            `SELECT u.nickname, ud.level
              FROM friends f
              JOIN users u ON f.friend_id = u.id
+             JOIN user_data ud ON ud.user_id = u.id
              WHERE f.user_id = ?`,
             [userId]
         );
 
-        // ✅ 나를 추가한 친구 목록 조회 (상대방이 나를 추가한 경우)
+        // 나를 친구로 추가한 사람들 조회
         const [friendsAddedMe] = await connection.query(
-            `SELECT f.user_id AS id, u.nickname AS nickname, f.status, f.created_at
+            `SELECT u.nickname, ud.level
              FROM friends f
              JOIN users u ON f.user_id = u.id
+             JOIN user_data ud ON ud.user_id = u.id
              WHERE f.friend_id = ?`,
             [userId]
         );
 
-        // ✅ 친구 목록 통합 (중복 제거)
+        // 닉네임 + 레벨 중복 제거
         const allFriends = [...friendsList, ...friendsAddedMe].filter(
             (friend, index, self) =>
-                index === self.findIndex((f) => f.id === friend.id)
+                index === self.findIndex((f) => f.nickname === friend.nickname)
         );
 
         res.json({ friends: allFriends });
@@ -446,10 +466,12 @@ app.get('/friends', authenticate, async (req, res) => {
     }
 });
 
+
+
 // 친구 삭제
 app.delete('/removeFriend', authenticate, async (req, res) => {
     const { friendNickname } = req.body;
-    const userId = req.user.id; // 현재 로그인한 사용자 ID
+    const userId = req.user.id;
 
     if (!friendNickname) {
         return res.status(400).json({ error: '삭제할 친구의 닉네임을 입력하세요.' });
@@ -457,7 +479,6 @@ app.delete('/removeFriend', authenticate, async (req, res) => {
 
     const connection = await pool.getConnection();
     try {
-        // 1️⃣ 친구의 user_id 찾기
         const [friendData] = await connection.query(
             `SELECT id FROM users WHERE nickname = ?`,
             [friendNickname]
@@ -508,6 +529,10 @@ app.post('/signup', authenticate, async (req, res) => {
         const [result] = await connection.query(
             `UPDATE users SET gender = ?, nickname = ? WHERE id = ?`,
             [gender, nickname, userId]
+        );
+        const [result2] = await connection.query(
+            `UPDATE user_data SET gender = ? WHERE id = ?`,
+            [gender, userId]
         );
 
         if (result.affectedRows === 0) {
