@@ -14,12 +14,13 @@ const pool = require('./db'); // MySQL 연결 파일 가져오기
 const cookieParser = require('cookie-parser');
 
 app.use(cors({
-    origin: 'http://localhost:5173', 
-    credentials: true,               
+    origin: 'http://h4capston.site',
+    credentials: true,
 }));
 
-app.use(express.json());
 app.use(cookieParser());
+app.use(express.json());
+
 
 app.get('/', (req, res) => {
     res.send("hi, we're h4!");
@@ -67,69 +68,91 @@ app.get('/auth/kakao/callback', async (req, res) => {
         const connection = await pool.getConnection();
         let redirectPath = '/main';
         try {
-            // 👇 users 테이블에서 해당 사용자 존재 여부 확인
-            if (user.email) {
-                [existingUser] = await connection.query(
-                    `SELECT * FROM users WHERE email = ?`,
-                    [user.email]
-                );
-            }
+            let [existingUser] = await connection.query(
+                `SELECT * FROM users WHERE email = ?`,
+                [user.email]
+            );
+
             if (existingUser.length === 0) {
                 [existingUser] = await connection.query(
                     `SELECT * FROM users WHERE id = ?`,
                     [user.id]
                 );
             }
+
             if (existingUser.length === 0) {
-                // 🔁 존재하지 않으면 users 테이블에 삽입
+                // 사용자 없음 -> 신규 회원 가입
                 await connection.query(
                     `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)`,
                     [user.id, user.email, user.nickname, user.provider]
                 );
+
+                // 기본 운동 목표와 함께 user_data 및 daily_quests 초기화
                 await connection.query(
                     `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
                      VALUES (?, 1, 500, 0, 0, 0, 0, NULL, NULL, NULL, NULL)`,
                     [user.id]
                 );
+
+                // 기본 퀘스트 목표 설정 (레벨 1 기준)
+                const levelGoals = [
+                    { level: 1, squat: 7, situp: 10, pushup: 5 },
+                    { level: 2, squat: 8, situp: 11, pushup: 6 },
+                    { level: 3, squat: 9, situp: 12, pushup: 7 },
+                    { level: 4, squat: 10, situp: 13, pushup: 8 },
+                    { level: 5, squat: 11, situp: 14, pushup: 9 },
+                    { level: 6, squat: 12, situp: 15, pushup: 10 },
+                    { level: 7, squat: 13, situp: 16, pushup: 11 },
+                    { level: 8, squat: 14, situp: 17, pushup: 12 },
+                    { level: 9, squat: 15, situp: 18, pushup: 13 },
+                    { level: 10, squat: 16, situp: 19, pushup: 14 }
+                ];
+
+                for (let i = 0; i < levelGoals.length; i++) {
+                    const goals = levelGoals[i];
+                    await connection.query(
+                        `INSERT INTO daily_quests (user_id, exercise_type, level, goal_count, experience, coin, is_success)
+                         VALUES 
+                            (?, 'squat', ?, ?, 35, 20, FALSE),
+                            (?, 'plank', ?, ?, 35, 20, FALSE),
+                            (?, 'pushup', ?, ?, 35, 20, FALSE)`,
+                        [
+                            user.id, goals.level, goals.squat, // first entry: squat, correct order
+                            user.id, goals.level, goals.situp, // second entry: situp, correct order
+                            user.id, goals.level, goals.pushup // third entry: pushup, correct order
+                        ]
+                    );
+                }
                 
 
-                // 👉 이 경우엔 /signup 으로 보냄
                 redirectPath = '/signup';
             } else {
-                // 🔁 존재하는 유저라면 정보 업데이트
+                // 기존 사용자라면 정보 업데이트
                 await connection.query(
                     `UPDATE users SET email = ?, nickname = ? WHERE id = ?`,
                     [user.email, user.nickname, user.id]
                 );
             }
-
-            // user_data는 별도 관리 - 있어도 되고 없어도 됨
         } finally {
             connection.release();
         }
 
         const token = generateToken({ id: user.id });
-
+        console.log(token);
         res.cookie('token', token, {
             httpOnly: true,
             secure: false,
             sameSite: 'Lax',
         });
-        const cors = require('cors');
 
-        app.use(cors({
-            origin: 'http://34.47.97.192:5173/',  // 프론트엔드 도메인
-            credentials: true,  // 쿠키가 전송되도록 설정
-        }));
-
-        // 👉 조건에 따라 리디렉션
-        res.redirect(`http://34.47.97.192:5173${redirectPath}`);
+        res.redirect(`http://h4capston.site${redirectPath}`);
 
     } catch (error) {
         console.error("카카오 로그인 오류:", error);
         res.status(400).json({ error: '카카오 로그인 실패' });
     }
 });
+
 
 app.get('/auth/naver', (req, res) => {
     const state = Math.random().toString(36).substring(2, 15); // CSRF 방지를 위한 상태 값
@@ -169,24 +192,65 @@ app.get('/auth/naver/callback', async (req, res) => {
         const connection = await pool.getConnection();
         let redirectPath = '/main';
         try {
-            const [existingUser] = await connection.query(
-                `SELECT * FROM users WHERE id = ?`,
-                [user.id]
+            let [existingUser] = await connection.query(
+                `SELECT * FROM users WHERE email = ?`,
+                [user.email]
             );
 
             if (existingUser.length === 0) {
+                [existingUser] = await connection.query(
+                    `SELECT * FROM users WHERE id = ?`,
+                    [user.id]
+                );
+            }
+
+            if (existingUser.length === 0) {
+                // 사용자 없음 -> 신규 회원 가입
                 await connection.query(
                     `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)`,
                     [user.id, user.email, user.nickname, user.provider]
                 );
+
+                // 기본 운동 목표와 함께 user_data 및 daily_quests 초기화
                 await connection.query(
                     `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
                      VALUES (?, 1, 500, 0, 0, 0, 0, NULL, NULL, NULL, NULL)`,
                     [user.id]
                 );
-                
+
+                // 기본 퀘스트 목표 설정 (레벨 1 기준)
+                const levelGoals = [
+                    { level: 1, squat: 7, plank: 35, pushup: 5 },
+                    { level: 2, squat: 8, plank: 40, pushup: 6 },
+                    { level: 3, squat: 9, plank: 40, pushup: 7 },
+                    { level: 4, squat: 10, plank: 45, pushup: 8 },
+                    { level: 5, squat: 11, plank: 45, pushup: 9 },
+                    { level: 6, squat: 12, plank: 50, pushup: 10 },
+                    { level: 7, squat: 13, plank: 50, pushup: 11 },
+                    { level: 8, squat: 14, plank: 55, pushup: 12 },
+                    { level: 9, squat: 15, plank: 55, pushup: 13 },
+                    { level: 10, squat: 16, plank: 60, pushup: 14 }
+                ];
+
+                for (let i = 0; i < levelGoals.length; i++) {
+                    const goals = levelGoals[i];
+                    await connection.query(
+                        `INSERT INTO daily_quests (user_id, exercise_type, level, goal_count, experience, coin, is_success)
+                         VALUES 
+                            (?, 'squat', ?, ?, 35, 20, FALSE),
+                            (?, 'situp', ?, ?, 35, 20, FALSE),
+                            (?, 'pushup', ?, ?, 35, 20, FALSE)`,
+                        [
+                            user.id, goals.level, goals.squat, // first entry: squat, correct order
+                            user.id, goals.level, goals.situp, // second entry: situp, correct order
+                            user.id, goals.level, goals.pushup // third entry: pushup, correct order
+                        ]
+                    );
+                }
+
                 redirectPath = '/signup';
             } else {
+                // 기존 사용자라면 정보 업데이트
                 await connection.query(
                     `UPDATE users SET email = ?, nickname = ? WHERE id = ?`,
                     [user.email, user.nickname, user.id]
@@ -205,7 +269,7 @@ app.get('/auth/naver/callback', async (req, res) => {
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
-        res.redirect(`http://34.47.97.192:5173${redirectPath}`);
+        res.redirect(`http://h4capston.site:5173${redirectPath}`);
 
     } catch (error) {
         console.error('네이버 로그인 오류:', error);
@@ -241,7 +305,6 @@ app.get('/auth/google/callback', async (req, res) => {
         });
 
         const accessToken = tokenResponse.data.access_token;
-
         const userResponse = await axios.get('https://www.googleapis.com/oauth2/v1/userinfo', {
             headers: { Authorization: `Bearer ${accessToken}` },
         });
@@ -256,24 +319,69 @@ app.get('/auth/google/callback', async (req, res) => {
         const connection = await pool.getConnection();
         let redirectPath = '/main';
         try {
-            const [existingUser] = await connection.query(
-                `SELECT * FROM users WHERE id = ?`,
-                [user.id]
+            let [existingUser] = await connection.query(
+                `SELECT * FROM users WHERE email = ?`,
+                [user.email]
             );
 
-            if (existingUser.length === 0) { 
-                await connection.query(
-                    `INSERT INTO users (id, nickname, provider) VALUES (?, ?, ?)`,
-                    [user.id, user.nickname, user.provider]
+            if (existingUser.length === 0) {
+                [existingUser] = await connection.query(
+                    `SELECT * FROM users WHERE id = ?`,
+                    [user.id]
                 );
+            }
+
+            if (existingUser.length === 0) {
+                // 사용자 없음 -> 신규 회원 가입
+                await connection.query(
+                    `INSERT INTO users (id, email, nickname, provider) VALUES (?, ?, ?, ?)`,
+                    [user.id, user.email, user.nickname, user.provider]
+                );
+
+                // 기본 운동 목표와 함께 user_data 및 daily_quests 초기화
                 await connection.query(
                     `INSERT INTO user_data (user_id, level, coin, targetExercise, targetcount, targetSet, targetCheck, gender, top, pants, state)
                      VALUES (?, 1, 500, 0, 0, 0, 0, NULL, NULL, NULL, NULL)`,
                     [user.id]
                 );
+
+                // 기본 퀘스트 목표 설정 (레벨 1 기준)
+                const levelGoals = [
+                    { level: 1, squat: 7, situp: 10, pushup: 5 },
+                    { level: 2, squat: 8, situp: 11, pushup: 6 },
+                    { level: 3, squat: 9, situp: 12, pushup: 7 },
+                    { level: 4, squat: 10, situp: 13, pushup: 8 },
+                    { level: 5, squat: 11, situp: 14, pushup: 9 },
+                    { level: 6, squat: 12, situp: 15, pushup: 10 },
+                    { level: 7, squat: 13, situp: 16, pushup: 11 },
+                    { level: 8, squat: 14, situp: 17, pushup: 12 },
+                    { level: 9, squat: 15, situp: 18, pushup: 13 },
+                    { level: 10, squat: 16, situp: 19, pushup: 14 }
+                ];
                 
+                for (let i = 0; i < levelGoals.length; i++) {
+                    const goals = levelGoals[i];
+                    await connection.query(
+                        `INSERT INTO daily_quests (user_id, exercise_type, level, goal_count, experience, coin, is_success)
+                         VALUES 
+                            (?, 'squat', ?, ?, 35, 20, FALSE),
+                            (?, 'situp', ?, ?, 35, 20, FALSE),
+                            (?, 'pushup', ?, ?, 35, 20, FALSE)`,
+                        [
+                            user.id, goals.level, goals.squat, // first entry: squat, correct order
+                            user.id, goals.level, goals.situp, // second entry: situp, correct order
+                            user.id, goals.level, goals.pushup // third entry: pushup, correct order
+                        ]
+                    );
+                }
+                
+                
+                
+                
+
                 redirectPath = '/signup';
             } else {
+                // 기존 사용자라면 정보 업데이트
                 await connection.query(
                     `UPDATE users SET email = ?, nickname = ? WHERE id = ?`,
                     [user.email, user.nickname, user.id]
@@ -284,14 +392,14 @@ app.get('/auth/google/callback', async (req, res) => {
         }
 
         const token = generateToken({ id: user.id });
+
         res.cookie('token', token, {
             httpOnly: true,
             secure: false,
             sameSite: 'Lax',
-            maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
-        res.redirect(`http://34.47.97.192:5173${redirectPath}`);
+        res.redirect(`http://localhost:5173${redirectPath}`);
 
     } catch (error) {
         console.error("구글 로그인 오류:", error);
@@ -531,7 +639,7 @@ app.post('/signup', authenticate, async (req, res) => {
             [gender, nickname, userId]
         );
         const [result2] = await connection.query(
-            `UPDATE user_data SET gender = ? WHERE id = ?`,
+            `UPDATE user_data SET gender = ? WHERE user_id = ?`,
             [gender, userId]
         );
 
@@ -550,7 +658,7 @@ app.post('/signup', authenticate, async (req, res) => {
 
 
 // 서버 시작
-app.listen(port, () => {
-  console.log(`Server is running on http://34.47.97.192:${port}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server is running on http://localhost:${port}`);
 });
 
